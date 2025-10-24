@@ -1,0 +1,10 @@
+[package]
+name = "kci"
+version = "0.1.0"
+edition = "2024"
+authors = ["Philo Groves <philogroves@gmail.com>"]
+description = "Continuous integration for Rust-based operating system kernels"
+license = "MIT"
+repository = "https://github.com/philogroves/kci"
+
+[dependencies]
