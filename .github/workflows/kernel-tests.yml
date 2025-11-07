@@ -1,0 +1,191 @@
+name: Reusable Kernel Tests
+
+on:
+  workflow_call:
+    inputs:
+      rust-toolchain:
+        description: 'Rust toolchain version'
+        required: false
+        type: string
+        default: 'nightly'
+      kboot-features:
+        description: 'Features to enable when installing kboot'
+        required: false
+        type: string
+        default: 'ci'
+      cargo-test-args:
+        description: 'Additional arguments to pass to cargo test'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      test-results-found:
+        description: 'Whether test results were found'
+        value: ${{ jobs.test.outputs.results-found }}
+      total-failures:
+        description: 'Total number of test failures'
+        value: ${{ jobs.test.outputs.total-failures }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      results-found: ${{ steps.find-results.outputs.results_dir != '' }}
+      total-failures: ${{ steps.check-failures.outputs.failed }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          components: rust-src, llvm-tools-preview
+      
+      - name: Install kboot
+        run: cargo install kboot --features "${{ inputs.kboot-features }}"
+      
+      - name: Run kernel tests
+        run: cargo test ${{ inputs.cargo-test-args }}
+      
+      # Debug step to see what was actually created
+      - name: Debug - List build directory
+        if: always()
+        run: |
+          echo "Contents of current directory:"
+          ls -la
+          echo ""
+          echo "Searching for .build directory:"
+          find . -type d -name ".build" || echo "No .build directory found"
+          echo ""
+          echo "Searching for testing-* directories:"
+          find . -type d -name "testing-*" || echo "No testing-* directories found"
+          echo ""
+          echo "Searching for *.json files:"
+          find . -name "*.json" || echo "No JSON files found"
+      
+      - name: Parse test results
+        if: always()
+        run: |
+          echo "## Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          
+          # Try multiple possible locations for test results
+          possible_dirs=(
+            ".build/testing-*"
+            "target/.build/testing-*"
+            "testing-*"
+            ".ktest/testing-*"
+          )
+          
+          latest_dir=""
+          for pattern in "${possible_dirs[@]}"; do
+            found_dir=$(find . -path "*/$pattern" -o -path "./$pattern" 2>/dev/null | sort -r | head -n 1)
+            if [ -n "$found_dir" ] && [ -d "$found_dir" ]; then
+              latest_dir="$found_dir"
+              break
+            fi
+          done
+          
+          if [ -n "$latest_dir" ] && [ -d "$latest_dir" ]; then
+            echo "Found test results in: $latest_dir" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            # Check if jq is available
+            if ! command -v jq &> /dev/null; then
+              echo "Installing jq..." >> $GITHUB_STEP_SUMMARY
+              sudo apt-get update && sudo apt-get install -y jq
+            fi
+            
+            for result_file in "$latest_dir"/*.json; do
+              if [ -f "$result_file" ]; then
+                echo "### $(basename $result_file)" >> $GITHUB_STEP_SUMMARY
+                
+                # Extract summary using jq with error handling
+                total=$(jq -r '.summary.total // 0' "$result_file" 2>/dev/null || echo "0")
+                passed=$(jq -r '.summary.passed // 0' "$result_file" 2>/dev/null || echo "0")
+                failed=$(jq -r '.summary.failed // 0' "$result_file" 2>/dev/null || echo "0")
+                ignored=$(jq -r '.summary.ignored // 0' "$result_file" 2>/dev/null || echo "0")
+                duration=$(jq -r '.summary.duration // "N/A"' "$result_file" 2>/dev/null || echo "N/A")
+                
+                echo "- **Total Tests:** $total" >> $GITHUB_STEP_SUMMARY
+                echo "- **Passed:** ✅ $passed" >> $GITHUB_STEP_SUMMARY
+                echo "- **Failed:** ❌ $failed" >> $GITHUB_STEP_SUMMARY
+                echo "- **Ignored:** ⏭️ $ignored" >> $GITHUB_STEP_SUMMARY
+                echo "- **Duration:** ${duration}ms" >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+                
+                # List failed tests if any
+                if [ "$failed" -gt 0 ]; then
+                  echo "#### Failed Tests:" >> $GITHUB_STEP_SUMMARY
+                  jq -r '.modules[]?.tests[]? | select(.result == "fail") | "- **\(.test)**: \(.message // "No message") (\(.location // "unknown location"))"' "$result_file" 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "Could not parse failed tests" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                fi
+              fi
+            done
+          else
+            echo "⚠️ No test results found in any expected location" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This could mean:" >> $GITHUB_STEP_SUMMARY
+            echo "- Tests didn't run with ktest" >> $GITHUB_STEP_SUMMARY
+            echo "- Output directory configuration is different" >> $GITHUB_STEP_SUMMARY
+            echo "- Tests completed but didn't generate JSON output" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Find test results directory
+        if: always()
+        id: find-results
+        run: |
+          latest_dir=$(find .build -maxdepth 1 -type d -name "testing-*" | sort -r | head -n 1)
+          echo "results_dir=$latest_dir" >> $GITHUB_OUTPUT
+          echo "Found results directory: $latest_dir"
+      
+      - name: Upload test results
+        if: always() && steps.find-results.outputs.results_dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ steps.find-results.outputs.results_dir }}
+          if-no-files-found: warn
+      
+      - name: Check for test failures
+        if: always()
+        id: check-failures
+        run: |
+          # Use the results directory we found earlier
+          results_dir="${{ steps.find-results.outputs.results_dir }}"
+          
+          if [ -n "$results_dir" ] && [ -d "$results_dir" ]; then
+            echo "Checking test results in: $results_dir"
+            
+            # Check if jq is available
+            if ! command -v jq &> /dev/null; then
+              sudo apt-get update && sudo apt-get install -y jq
+            fi
+            
+            failed=0
+            for result_file in "$results_dir"/*.json; do
+              if [ -f "$result_file" ]; then
+                echo "Processing: $(basename $result_file)"
+                failures=$(jq -r '.summary.failed // 0' "$result_file" 2>/dev/null || echo "0")
+                echo "  Failures in this file: $failures"
+                failed=$((failed + failures))
+              fi
+            done
+            
+            echo "Total failures across all test files: $failed"
+            echo "failed=$failed" >> $GITHUB_OUTPUT
+            
+            if [ $failed -gt 0 ]; then
+              echo "❌ $failed test(s) failed"
+              exit 1
+            else
+              echo "✅ All tests passed"
+            fi
+          else
+            echo "⚠️ No test results found"
+            echo "This might mean tests didn't generate JSON output"
+            echo "failed=0" >> $GITHUB_OUTPUT
+            # Don't fail if no JSON output - rely on cargo test exit code instead
+            echo "Relying on cargo test exit code..."
+          fi
