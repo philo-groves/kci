@@ -168,6 +168,13 @@ jobs:
           name: test-results
           path: ${{ steps.find-results.outputs.results_dir }}
           if-no-files-found: warn
+
+      - name: Upload ./build/kernel.img
+        if: always() && steps.find-results.outputs.results_dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: ./build/kernel.img
       
       - name: Check for test failures
         if: always()
