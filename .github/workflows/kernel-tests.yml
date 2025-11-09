@@ -28,7 +28,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       results-found: ${{ steps.find-results.outputs.results_dir != '' }}
       total-failures: ${{ steps.check-failures.outputs.failed }}
@@ -54,8 +54,11 @@ jobs:
       - name: Install kboot
         run: cargo install kboot --features "${{ inputs.kboot-features }}"
       
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+
       - name: Run kernel tests
-        run: cargo test ${{ inputs.cargo-test-args }}
+        run: cargo hack test --workspace ${{ inputs.cargo-test-args }}
       
       # Debug step to see what was actually created
       - name: Debug - List build directory
