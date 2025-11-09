@@ -55,7 +55,7 @@ jobs:
         run: cargo install kboot --features "${{ inputs.kboot-features }}"
       
       - name: Install cargo-hack
-        run: cargo install cargo-hack
+        run: cargo install --force cargo-hack
 
       - name: Install x86_64-unknown-none target
         run: rustup target add x86_64-unknown-none
