@@ -51,9 +51,12 @@ jobs:
       - name: Print Rust Details
         run: rustup show && rustc --version && cargo --version && ldd --version
 
-      - name: Install kboot
-        run: cargo install kboot --features "${{ inputs.kboot-features }}"
-      
+      - name: Build kboot from source
+        run: |
+          git clone https://github.com/philo-groves/kboot.git
+            cd kboot
+            cargo install --path . --features "${{ inputs.kboot-features }}" --force --
+
       - name: Full cargo clean & kboot clean
         run: kboot clean
 
@@ -62,9 +65,6 @@ jobs:
 
       - name: Install x86_64-unknown-none target
         run: rustup target add x86_64-unknown-none
-
-      - name: Install glibc
-        run: sudo apt-get update && sudo apt-get install -y glibc-source
 
       - name: Run kernel tests
         run: cargo hack test --workspace ${{ inputs.cargo-test-args }}
