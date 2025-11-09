@@ -1,3 +1,4 @@
+
 name: Reusable Kernel Tests
 
 on:
@@ -28,7 +29,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    runs-on: windows-2025
     outputs:
       results-found: ${{ steps.find-results.outputs.results_dir != '' }}
       total-failures: ${{ steps.check-failures.outputs.failed }}
@@ -38,12 +39,11 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Install Rust
+        shell: pwsh
         run: |
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
-            source $HOME/.cargo/env
-
-      - name: Install lib6
-        run: sudo apt-get update && sudo apt-get install -y libc6
+          Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+          .\rustup-init.exe -y --default-toolchain nightly
+          Remove-Item rustup-init.exe
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -51,102 +51,126 @@ jobs:
           toolchain: ${{ inputs.rust-toolchain }}
           components: rust-src, llvm-tools-preview
       
+      - name: Print Rust Details
+        shell: pwsh
+        run: |
+          rustup show
+          rustc --version
+          cargo --version
+
       - name: Install kboot
+        shell: pwsh
         run: cargo install kboot --features "${{ inputs.kboot-features }}"
       
       - name: Run kernel tests
+        shell: pwsh
         run: cargo test ${{ inputs.cargo-test-args }}
       
       # Debug step to see what was actually created
       - name: Debug - List build directory
         if: always()
+        shell: pwsh
         run: |
-          echo "Contents of current directory:"
-          ls -la
-          echo ""
-          echo "Searching for .build directory:"
-          find . -type d -name ".build" || echo "No .build directory found"
-          echo ""
-          echo "Searching for testing-* directories:"
-          find . -type d -name "testing-*" || echo "No testing-* directories found"
-          echo ""
-          echo "Searching for *.json files:"
-          find . -name "*.json" || echo "No JSON files found"
+          Write-Output "Contents of current directory:"
+          Get-ChildItem -Force
+          Write-Output ""
+          Write-Output "Searching for .build directory:"
+          Get-ChildItem -Recurse -Directory -Filter ".build" -ErrorAction SilentlyContinue | Select-Object FullName
+          Write-Output ""
+          Write-Output "Searching for testing-* directories:"
+          Get-ChildItem -Recurse -Directory -Filter "testing-*" -ErrorAction SilentlyContinue | Select-Object FullName
+          Write-Output ""
+          Write-Output "Searching for *.json files:"
+          Get-ChildItem -Recurse -Filter "*.json" -ErrorAction SilentlyContinue | Select-Object FullName
       
       - name: Parse test results
         if: always()
+        shell: pwsh
         run: |
-          echo "## Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          "## Test Results Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           
           # Try multiple possible locations for test results
-          possible_dirs=(
-            ".build/testing-*"
-            "target/.build/testing-*"
-            "testing-*"
-            ".ktest/testing-*"
+          $possiblePatterns = @(
+            ".build\testing-*",
+            "target\.build\testing-*",
+            "testing-*",
+            ".ktest\testing-*"
           )
           
-          latest_dir=""
-          for pattern in "${possible_dirs[@]}"; do
-            found_dir=$(find . -path "*/$pattern" -o -path "./$pattern" 2>/dev/null | sort -r | head -n 1)
-            if [ -n "$found_dir" ] && [ -d "$found_dir" ]; then
-              latest_dir="$found_dir"
+          $latestDir = $null
+          foreach ($pattern in $possiblePatterns) {
+            $foundDirs = Get-ChildItem -Path . -Directory -Filter ($pattern.Split('\')[-1]) -Recurse -ErrorAction SilentlyContinue | 
+                         Where-Object { $_.FullName -like "*$($pattern.Replace('\','*'))" } |
+                         Sort-Object LastWriteTime -Descending |
+                         Select-Object -First 1
+            
+            if ($foundDirs) {
+              $latestDir = $foundDirs.FullName
               break
-            fi
-          done
+            }
+          }
           
-          if [ -n "$latest_dir" ] && [ -d "$latest_dir" ]; then
-            echo "Found test results in: $latest_dir" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+          if ($latestDir -and (Test-Path $latestDir)) {
+            "Found test results in: $latestDir" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
             
-            # Check if jq is available
-            if ! command -v jq &> /dev/null; then
-              echo "Installing jq..." >> $GITHUB_STEP_SUMMARY
-              sudo apt-get update && sudo apt-get install -y jq
-            fi
+            $jsonFiles = Get-ChildItem -Path $latestDir -Filter "*.json"
             
-            for result_file in "$latest_dir"/*.json; do
-              if [ -f "$result_file" ]; then
-                echo "### $(basename $result_file)" >> $GITHUB_STEP_SUMMARY
-                
-                # Extract summary using jq with error handling
-                total=$(jq -r '.summary.total // 0' "$result_file" 2>/dev/null || echo "0")
-                passed=$(jq -r '.summary.passed // 0' "$result_file" 2>/dev/null || echo "0")
-                failed=$(jq -r '.summary.failed // 0' "$result_file" 2>/dev/null || echo "0")
-                ignored=$(jq -r '.summary.ignored // 0' "$result_file" 2>/dev/null || echo "0")
-                duration=$(jq -r '.summary.duration // "N/A"' "$result_file" 2>/dev/null || echo "N/A")
-                
-                echo "- **Total Tests:** $total" >> $GITHUB_STEP_SUMMARY
-                echo "- **Passed:** ✅ $passed" >> $GITHUB_STEP_SUMMARY
-                echo "- **Failed:** ❌ $failed" >> $GITHUB_STEP_SUMMARY
-                echo "- **Ignored:** ⏭️ $ignored" >> $GITHUB_STEP_SUMMARY
-                echo "- **Duration:** ${duration}ms" >> $GITHUB_STEP_SUMMARY
-                echo "" >> $GITHUB_STEP_SUMMARY
-                
-                # List failed tests if any
-                if [ "$failed" -gt 0 ]; then
-                  echo "#### Failed Tests:" >> $GITHUB_STEP_SUMMARY
-                  jq -r '.modules[]?.tests[]? | select(.result == "fail") | "- **\(.test)**: \(.message // "No message") (\(.location // "unknown location"))"' "$result_file" 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "Could not parse failed tests" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                fi
-              fi
-            done
-          else
-            echo "⚠️ No test results found in any expected location" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "This could mean:" >> $GITHUB_STEP_SUMMARY
-            echo "- Tests didn't run with ktest" >> $GITHUB_STEP_SUMMARY
-            echo "- Output directory configuration is different" >> $GITHUB_STEP_SUMMARY
-            echo "- Tests completed but didn't generate JSON output" >> $GITHUB_STEP_SUMMARY
-          fi
+            foreach ($resultFile in $jsonFiles) {
+              "### $($resultFile.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              
+              # Parse JSON and extract summary
+              $json = Get-Content $resultFile.FullName -Raw | ConvertFrom-Json
+              
+              $total = if ($json.summary.total) { $json.summary.total } else { 0 }
+              $passed = if ($json.summary.passed) { $json.summary.passed } else { 0 }
+              $failed = if ($json.summary.failed) { $json.summary.failed } else { 0 }
+              $ignored = if ($json.summary.ignored) { $json.summary.ignored } else { 0 }
+              $duration = if ($json.summary.duration) { $json.summary.duration } else { "N/A" }
+              
+              "- **Total Tests:** $total" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "- **Passed:** ✅ $passed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "- **Failed:** ❌ $failed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "- **Ignored:** ⏭️ $ignored" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "- **Duration:** ${duration}ms" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              
+              # List failed tests if any
+              if ($failed -gt 0) {
+                "#### Failed Tests:" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+                foreach ($module in $json.modules) {
+                  foreach ($test in $module.tests) {
+                    if ($test.result -eq "fail") {
+                      $message = if ($test.message) { $test.message } else { "No message" }
+                      $location = if ($test.location) { $test.location } else { "unknown location" }
+                      "- **$($test.test)**: $message ($location)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+                    }
+                  }
+                }
+                "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              }
+            }
+          } else {
+            "⚠️ No test results found in any expected location" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "This could mean:" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "- Tests didn't run with ktest" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "- Output directory configuration is different" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "- Tests completed but didn't generate JSON output" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
       
       - name: Find test results directory
         if: always()
         id: find-results
+        shell: pwsh
         run: |
-          latest_dir=$(find .build -maxdepth 1 -type d -name "testing-*" | sort -r | head -n 1)
-          echo "results_dir=$latest_dir" >> $GITHUB_OUTPUT
-          echo "Found results directory: $latest_dir"
+          $latestDir = Get-ChildItem -Path .build -Directory -Filter "testing-*" -ErrorAction SilentlyContinue | 
+                       Sort-Object LastWriteTime -Descending | 
+                       Select-Object -First 1 | 
+                       Select-Object -ExpandProperty FullName
+          
+          "results_dir=$latestDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Output "Found results directory: $latestDir"
       
       - name: Upload test results
         if: always() && steps.find-results.outputs.results_dir != ''
@@ -159,41 +183,38 @@ jobs:
       - name: Check for test failures
         if: always()
         id: check-failures
+        shell: pwsh
         run: |
           # Use the results directory we found earlier
-          results_dir="${{ steps.find-results.outputs.results_dir }}"
+          $resultsDir = "${{ steps.find-results.outputs.results_dir }}"
           
-          if [ -n "$results_dir" ] && [ -d "$results_dir" ]; then
-            echo "Checking test results in: $results_dir"
+          if ($resultsDir -and (Test-Path $resultsDir)) {
+            Write-Output "Checking test results in: $resultsDir"
             
-            # Check if jq is available
-            if ! command -v jq &> /dev/null; then
-              sudo apt-get update && sudo apt-get install -y jq
-            fi
+            $failed = 0
+            $jsonFiles = Get-ChildItem -Path $resultsDir -Filter "*.json"
             
-            failed=0
-            for result_file in "$results_dir"/*.json; do
-              if [ -f "$result_file" ]; then
-                echo "Processing: $(basename $result_file)"
-                failures=$(jq -r '.summary.failed // 0' "$result_file" 2>/dev/null || echo "0")
-                echo "  Failures in this file: $failures"
-                failed=$((failed + failures))
-              fi
-            done
+            foreach ($resultFile in $jsonFiles) {
+              Write-Output "Processing: $($resultFile.Name)"
+              $json = Get-Content $resultFile.FullName -Raw | ConvertFrom-Json
+              $failures = if ($json.summary.failed) { $json.summary.failed } else { 0 }
+              Write-Output "  Failures in this file: $failures"
+              $failed += $failures
+            }
             
-            echo "Total failures across all test files: $failed"
-            echo "failed=$failed" >> $GITHUB_OUTPUT
+            Write-Output "Total failures across all test files: $failed"
+            "failed=$failed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             
-            if [ $failed -gt 0 ]; then
-              echo "❌ $failed test(s) failed"
+            if ($failed -gt 0) {
+              Write-Output "❌ $failed test(s) failed"
               exit 1
-            else
-              echo "✅ All tests passed"
-            fi
-          else
-            echo "⚠️ No test results found"
-            echo "This might mean tests didn't generate JSON output"
-            echo "failed=0" >> $GITHUB_OUTPUT
+            } else {
+              Write-Output "✅ All tests passed"
+            }
+          } else {
+            Write-Output "⚠️ No test results found"
+            Write-Output "This might mean tests didn't generate JSON output"
+            "failed=0" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             # Don't fail if no JSON output - rely on cargo test exit code instead
-            echo "Relying on cargo test exit code..."
-          fi
+            Write-Output "Relying on cargo test exit code..."
+          }
