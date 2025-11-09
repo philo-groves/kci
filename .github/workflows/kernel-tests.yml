@@ -169,8 +169,8 @@ jobs:
           path: ${{ steps.find-results.outputs.results_dir }}
           if-no-files-found: warn
 
-      - name: Upload ./build/kernel.img
-        if: always() && steps.find-results.outputs.results_dir != ''
+      - name: Upload kernel image
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-image
