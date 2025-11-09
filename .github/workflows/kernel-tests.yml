@@ -28,7 +28,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     outputs:
       results-found: ${{ steps.find-results.outputs.results_dir != '' }}
       total-failures: ${{ steps.check-failures.outputs.failed }}
