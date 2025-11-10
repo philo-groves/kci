@@ -175,7 +175,14 @@ jobs:
         with:
           name: kernel-image
           path: ./.build/kernel.img
-      
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: ./.build/logs
+
       - name: Check for test failures
         if: always()
         id: check-failures
